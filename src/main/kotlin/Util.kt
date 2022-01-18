@@ -44,3 +44,16 @@ inline fun <
     return Pair(left, right)
 }
 
+fun <T, C: PersistentCollection<T>> Iterable<Iterable<T>>.productTo(c: C): List<C> =
+    fold(mutableListOf(c)) { acc: MutableList<C>, set ->
+        mutableListOf<C>().apply {
+            for (list in acc) {
+                for (element in set) {
+                    add(list.add(element) as C)
+                }
+            }
+        }
+    }
+
+inline fun <T, R, C : PersistentCollection<R>> Iterable<T>.mapTo(destination: C, transform: (T) -> R): C =
+    mapTo(destination.builder(), transform).build() as C

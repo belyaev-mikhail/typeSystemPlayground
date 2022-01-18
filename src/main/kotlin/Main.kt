@@ -133,8 +133,18 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                         persistentHashSetBuilder(),
                         persistentHashSetBuilder()
                     ) { it is KsUnion }
+                    @Suppress("UNCHECKED_CAST") (u as PersistentSet.Builder<KsUnion>)
 
-                    TODO()
+                    u += arg
+                    nu += resArgs
+
+                    return makeNormalized(::KsUnion,
+                        u.map { it.args + nu }
+                            .productTo(persistentSetOf())
+                            .mapTo(persistentSetOf()) {
+                                makeNormalized(::KsIntersection, it)
+                            }
+                    )
                 }
                 else -> handleArg(arg, resArgs)
             }
