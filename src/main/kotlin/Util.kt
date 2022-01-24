@@ -57,3 +57,6 @@ fun <T, C: PersistentCollection<T>> Iterable<Iterable<T>>.productTo(c: C): List<
 
 inline fun <T, R, C : PersistentCollection<R>> Iterable<T>.mapTo(destination: C, transform: (T) -> R): C =
     mapTo(destination.builder(), transform).build() as C
+
+inline fun <T, C : PersistentCollection<T>> Iterable<T>.filterTo(destination: C, predicate: (T) -> Boolean): C =
+    filterTo(destination.builder(), predicate).build() as C

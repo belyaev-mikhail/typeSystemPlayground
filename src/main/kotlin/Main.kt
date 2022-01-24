@@ -1,6 +1,7 @@
 
 import kotlinx.collections.immutable.*
 import kotlin.reflect.KClass
+import kotlin.reflect.KProperty
 
 enum class SubtypingRelation {
 
@@ -37,7 +38,8 @@ enum class SubtypingRelation {
 }
 
 sealed interface KsType {
-    fun normalizeStep(): KsType
+    fun normalizeWithStructure(env: TypingEnvironment): KsType
+    fun normalizeWithSubtyping(env: TypingEnvironment): KsType = this
     fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation
 
     companion object {
@@ -47,21 +49,34 @@ sealed interface KsType {
 }
 
 abstract class TypingEnvironment {
-    abstract infix fun KsConstructor.subtypeOf(that: KsConstructor): Boolean
-    infix fun KsConstructor.supertypeOf(that: KsConstructor): Boolean = that subtypeOf this
+    abstract infix fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation
 
+    infix fun KsConstructor.subtypeOf(that: KsConstructor): Boolean =
+        SubtypingRelation.Subtype in this.subtypingRelationTo(that)
+    infix fun KsConstructor.supertypeOf(that: KsConstructor): Boolean =
+        SubtypingRelation.Supertype in this.subtypingRelationTo(that)
 
+    inline infix fun KsType.subtypeOf(that: KsType): Boolean =
+        SubtypingRelation.Subtype in this.subtypingRelationTo(that)
+    inline infix fun KsType.supertypeOf(that: KsType): Boolean =
+        SubtypingRelation.Supertype in this.subtypingRelationTo(that)
 
+    inline infix fun KsType.subtypingRelationTo(that: KsType): SubtypingRelation =
+        this.subtypingRelationTo(this@TypingEnvironment, that)
+
+    abstract fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType
+    abstract fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication
 }
 
-inline fun <reified T: KsType, Arg> makeNormalized(constructor: (Arg) -> T, arg: Arg): KsType =
-    constructor(arg).normalizeStep()
+inline fun <reified T: KsType, Arg> makeNormalized(env: TypingEnvironment,
+                                                   constructor: (Arg) -> T, arg: Arg): KsType =
+    constructor(arg).normalizeWithStructure(env).normalizeWithSubtyping(env)
 
-inline fun <reified T: KsType, A, B> makeNormalized(constructor: (A, B) -> T, a: A, b: B): KsType =
-    constructor(a, b).normalizeStep()
+inline fun <reified T: KsType, A, B> makeNormalized(env: TypingEnvironment,constructor: (A, B) -> T, a: A, b: B): KsType =
+    constructor(a, b).normalizeWithStructure(env).normalizeWithSubtyping(env)
 
 private fun parenthesize(type: KsType) = when(type) {
-    is KsConstructor, is KsTypeApplication -> "$type"
+    is KsConstructor, is KsTypeApplication, is KsNullable -> "$type"
     else -> "($type)"
 }
 
@@ -95,7 +110,7 @@ data class KsFlexible(val from: KsType, val to: KsType): KsType {
         return from.subtypingRelationTo(env, that) or to.subtypingRelationTo(env, that)
     }
 
-    override fun normalizeStep(): KsType = when {
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
         from == to -> from
         from is KsFlexible || to is KsFlexible -> {
             val adjFrom = if (from is KsFlexible) from.from else from
@@ -105,31 +120,35 @@ data class KsFlexible(val from: KsType, val to: KsType): KsType {
         else -> this
     }
 
+    override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
+        if (!(to supertypeOf from)) throw IllegalStateException("Incorrect flexible type: $this")
+        this@KsFlexible
+    }
+
     override fun toString(): String {
         return "${parenthesize(from)}..${parenthesize(to)}"
     }
 }
 fun KsFlexible(env: TypingEnvironment,
                from: KsType,
-               to: KsType): KsType = makeNormalized(::KsFlexible, from, to)
+               to: KsType): KsType = makeNormalized(env, ::KsFlexible, from, to)
 
 data class KsNullable(val base: KsType): KsType {
-    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation {
-        if (that is KsFlexible) return that.subtypingRelationTo(env, this).invert()
-        if (that is KsNullable) return base.subtypingRelationTo(env, that.base)
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with(env) {
+        if (that is KsFlexible) return that.subtypingRelationTo(this@KsNullable).invert()
+        if (that is KsNullable) return base.subtypingRelationTo(that.base)
 
-        val toBase = base.subtypingRelationTo(env, that)
         return when {
-            toBase contains SubtypingRelation.Supertype -> SubtypingRelation.Supertype
+            base supertypeOf that -> SubtypingRelation.Supertype
             else -> SubtypingRelation.Unrelated
         }
     }
 
-    override fun normalizeStep(): KsType = when(base) {
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when(base) {
         is KsFlexible ->
-            makeNormalized(::KsFlexible,
-                makeNormalized(::KsNullable, base.from),
-                makeNormalized(::KsNullable, base.to)
+            makeNormalized(env, ::KsFlexible,
+                makeNormalized(env, ::KsNullable, base.from),
+                makeNormalized(env, ::KsNullable, base.to)
             )
         is KsNullable -> base
         else -> this
@@ -143,27 +162,40 @@ data class KsNullable(val base: KsType): KsType {
     }
 }
 fun KsNullable(env: TypingEnvironment,
-               base: KsType): KsType = makeNormalized(::KsNullable, base)
+               base: KsType): KsType = makeNormalized(env, ::KsNullable, base)
 
 data class KsUnion(val args: PersistentSet<KsType>): KsType {
-    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation {
-        if (that is KsFlexible) return that.subtypingRelationTo(env, this).invert()
-        if (that is KsNullable) return that.subtypingRelationTo(env, this).invert()
-
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with (env) {
+        when (that) {
+            is KsFlexible, is KsNullable -> return that.subtypingRelationTo(this@KsUnion).invert()
+            else -> {}
+        }
         if (that in args) return SubtypingRelation.Supertype
-        if (that !is KsUnion) {
-            if (args.any { it.subtypingRelationTo(env, that) contains SubtypingRelation.Supertype })
-                return SubtypingRelation.Supertype
-            else if (args.all { it.subtypingRelationTo(env, that) contains SubtypingRelation.Subtype })
-                return SubtypingRelation.Subtype
-            else return SubtypingRelation.Unrelated
-        } else {
+        if (that is KsUnion) {
+            if (args == that.args) return SubtypingRelation.Equivalent
+            if (args.containsAll(that.args)) return SubtypingRelation.Supertype
+            if (that.args.containsAll(args)) return SubtypingRelation.Subtype
+
             var result: SubtypingRelation = SubtypingRelation.Unrelated
-            if (that.args.all { subtypingRelationTo(env, it) contains SubtypingRelation.Supertype })
+
+            // forall thatElement in that.args exists thisElement in args such that
+            //          thisElement >: thatElement
+            infix fun PersistentSet<KsType>.superArgs(that: PersistentSet<KsType>): Boolean {
+                return that.all { thatElement ->
+                    this.any { thisElement -> thisElement supertypeOf thatElement }
+                }
+            }
+            if (args superArgs that.args)
                 result = result or SubtypingRelation.Supertype
-            if (args.all { that.subtypingRelationTo(env, it) contains SubtypingRelation.Supertype })
+            if (that.args superArgs args)
                 result = result or SubtypingRelation.Subtype
             return result
+        } else {
+            if (args.any { it supertypeOf that })
+                return SubtypingRelation.Supertype
+            else if (args.all { it subtypeOf that })
+                return SubtypingRelation.Subtype
+            else return SubtypingRelation.Unrelated
         }
     }
 
@@ -177,12 +209,12 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
         }
     }
 
-    fun handleProjections(i: Iterable<KsProjection>) = KsProjection(
-        inBound = makeNormalized(::KsIntersection, i.mapTo(persistentHashSetOf()) { it.inBound }),
-        outBound = makeNormalized(::KsUnion, i.mapTo(persistentHashSetOf()) { it.outBound })
+    fun handleProjections(env: TypingEnvironment, i: Iterable<KsProjection>) = KsProjection(
+        inBound = makeNormalized(env, ::KsIntersection, i.mapTo(persistentHashSetOf()) { it.inBound }),
+        outBound = makeNormalized(env, ::KsUnion, i.mapTo(persistentHashSetOf()) { it.outBound })
     )
 
-    override fun normalizeStep(): KsType {
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
         if (args.size == 1) return args.first()
 
@@ -196,10 +228,10 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                     f += arg
                     nf += resArgs
                     // What?
-                    return makeNormalized(::KsFlexible,
-                        makeNormalized(::KsUnion, nf.build().addAll(
+                    return makeNormalized(env, ::KsFlexible,
+                        makeNormalized(env, ::KsUnion, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.from })),
-                        makeNormalized(::KsUnion, nf.build().addAll(
+                        makeNormalized(env, ::KsUnion, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.to }))
                     )
                 }
@@ -209,8 +241,10 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                     nn += resArgs
                     // What?
                     return makeNormalized(
+                        env,
                         ::KsNullable,
                         makeNormalized(
+                            env,
                             ::KsUnion,
                             n.mapTo(persistentHashSetOf()) { it.base }.addAll(nn)
                         )
@@ -230,14 +264,18 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
 
                         @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
 
-                        val reviso = makeNormalized(::KsTypeApplication,
+                        val reviso = makeNormalized(
+                            env,
+                            ::KsTypeApplication,
                             arg.constructor,
                             arg.args.indices.mapTo(persistentListOf()) { ix ->
-                                handleProjections(me.map { it.args[ix] })
+                                handleProjections(env, me.map { it.args[ix] })
                             }
                         )
 
-                        return makeNormalized(::KsIntersection,
+                        return makeNormalized(
+                            env,
+                            ::KsIntersection,
                             notMe.build().add(reviso)
                         )
                     }
@@ -255,17 +293,62 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
         }
     }
 
+    override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
+        val subtypes = args.filterTo(persistentHashSetOf()) { l ->
+            args.any { l != it && l subtypeOf it }
+        }
+        if (subtypes.isEmpty()) return this@KsUnion
 
+        val newArgs = args.removeAll(subtypes)
+
+        if (newArgs.size == 1) return newArgs.single()
+
+        return KsUnion(newArgs)
+    }
 
     override fun toString(): String {
         return args.joinToString(" | ")
     }
 }
 fun KsUnion(env: TypingEnvironment, args: PersistentSet<KsType>): KsType =
-    makeNormalized(::KsUnion, args)
+    makeNormalized(env, ::KsUnion, args)
 fun KsUnion(env: TypingEnvironment, vararg args: KsType): KsType =
-    makeNormalized(::KsUnion, persistentHashSetOf(*args))
+    makeNormalized(env, ::KsUnion, persistentHashSetOf(*args))
 data class KsIntersection(val args: PersistentSet<KsType>): KsType {
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with(env) {
+        when (that) {
+            is KsFlexible, is KsNullable, is KsUnion ->
+                return that.subtypingRelationTo(this@KsIntersection).invert()
+            else -> {}
+        }
+
+        if (that in args) return SubtypingRelation.Subtype
+
+        if (that is KsIntersection) {
+            if (args == that.args) return SubtypingRelation.Equivalent
+            if (args.containsAll(that.args)) return SubtypingRelation.Subtype
+            if (that.args.containsAll(args)) return SubtypingRelation.Supertype
+
+            infix fun PersistentSet<KsType>.subArgs(that: PersistentSet<KsType>): Boolean {
+                return that.all { thatElement ->
+                    this.any { thisElement -> thisElement subtypeOf thatElement }
+                }
+            }
+
+            var result: SubtypingRelation = SubtypingRelation.Unrelated
+            if (args subArgs that.args)
+                result = result or SubtypingRelation.Subtype
+            if (that.args subArgs args)
+                result = result or SubtypingRelation.Supertype
+            return result
+        } else {
+            if (args.any { it subtypeOf that }) return SubtypingRelation.Subtype
+            if (args.all { it supertypeOf that }) return SubtypingRelation.Supertype
+            return SubtypingRelation.Unrelated
+        }
+    }
+
+
     fun handleArg(arg: KsType, resArgs: PersistentSet.Builder<KsType>) {
         when (arg) {
             is KsFlexible, is KsNullable, is KsUnion -> throw IllegalStateException()
@@ -276,12 +359,13 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
         }
     }
 
-    fun handleProjections(i: Iterable<KsProjection>) = KsProjection(
-        inBound = makeNormalized(::KsUnion, i.mapTo(persistentHashSetOf()) { it.inBound }),
-        outBound = makeNormalized(::KsIntersection, i.mapTo(persistentHashSetOf()) { it.outBound })
+
+    fun handleProjections(env: TypingEnvironment, i: Iterable<KsProjection>) = KsProjection(
+        inBound = makeNormalized(env, ::KsUnion, i.mapTo(persistentHashSetOf()) { it.inBound }),
+        outBound = makeNormalized(env, ::KsIntersection, i.mapTo(persistentHashSetOf()) { it.outBound })
     )
 
-    override fun normalizeStep(): KsType {
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
         if (args.size == 1) return args.first()
 
@@ -295,10 +379,10 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                     f += arg
                     nf += resArgs
                     // What?
-                    return makeNormalized(::KsFlexible,
-                        makeNormalized(::KsIntersection, nf.build().addAll(
+                    return makeNormalized(env, ::KsFlexible,
+                        makeNormalized(env, ::KsIntersection, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.from })),
-                        makeNormalized(::KsIntersection, nf.build().addAll(
+                        makeNormalized(env, ::KsIntersection, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.to }))
                     )
                 }
@@ -307,11 +391,11 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                     u += arg
                     nu += resArgs
 
-                    return makeNormalized(::KsUnion,
+                    return makeNormalized(env, ::KsUnion,
                         u.map { it.args }
                             .productTo(persistentHashSetOf())
                             .mapTo(persistentHashSetOf()) {
-                                makeNormalized(::KsIntersection, it.addAll(nu))
+                                makeNormalized(env, ::KsIntersection, it.addAll(nu))
                             }
                     )
                 }
@@ -324,12 +408,15 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
                     if (nn.isNotEmpty())
                         return makeNormalized(
+                            env,
                             ::KsIntersection,
                             banged.addAll(nn)
                         )
                     else return makeNormalized(
+                        env,
                         ::KsNullable,
                         makeNormalized(
+                            env,
                             ::KsIntersection,
                             banged
                         )
@@ -348,14 +435,16 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
                         @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
 
-                        val reviso = makeNormalized(::KsTypeApplication,
+                        val reviso = makeNormalized(env,
+                            ::KsTypeApplication,
                             arg.constructor,
                             arg.args.indices.mapTo(persistentListOf()) { ix ->
-                                handleProjections(me.map { it.args[ix] })
+                                handleProjections(env, me.map { it.args[ix] })
                             }
                         )
 
-                        return makeNormalized(::KsIntersection,
+                        return makeNormalized(env,
+                            ::KsIntersection,
                             notMe.build().add(reviso)
                         )
                     }
@@ -374,17 +463,62 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
         }
     }
 
+    override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
+        val supertypes = args.filterTo(persistentHashSetOf()) { l ->
+            args.any { l != it && l supertypeOf it }
+        }
+        if (supertypes.isEmpty()) return this@KsIntersection
+
+        val newArgs = args.removeAll(supertypes)
+
+        if (newArgs.size == 1) return newArgs.single()
+
+        return KsIntersection(newArgs)
+    }
+
     override fun toString(): String {
         return args.joinToString(" & ")
     }
 }
 fun KsIntersection(env: TypingEnvironment, args: PersistentSet<KsType>): KsType =
-    makeNormalized(::KsIntersection, args)
+    makeNormalized(env, ::KsIntersection, args)
 fun KsIntersection(env: TypingEnvironment, vararg args: KsType): KsType =
-    makeNormalized(::KsIntersection, persistentHashSetOf(*args))
+    makeNormalized(env, ::KsIntersection, persistentHashSetOf(*args))
 
-data class KsConstructor(val name: String): KsType {
-    override fun normalizeStep(): KsType = this
+sealed interface KsBaseType: KsType {
+    val constructor: KsConstructor
+}
+
+data class KsConstructor(val name: String): KsBaseType {
+    override val constructor: KsConstructor
+        get() = this
+
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = this
+
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation =
+        with(env) {
+            when(that) {
+                is KsFlexible, is KsNullable, is KsUnion, is KsIntersection ->
+                    return that.subtypingRelationTo(this@KsConstructor).invert()
+                else -> {}
+            }
+
+            if (that is KsConstructor) {
+                that as KsConstructor
+                return this@KsConstructor subtypingRelationTo that
+            } else if (that is KsTypeApplication) {
+                when (this@KsConstructor subtypingRelationTo that.constructor) {
+                    SubtypingRelation.Supertype -> return SubtypingRelation.Supertype
+                    SubtypingRelation.Unrelated -> return SubtypingRelation.Unrelated
+                    else -> {
+                        val effective = getEffectiveSupertypeByConstructor(that.constructor)
+                        return that.subtypingRelationTo(effective).invert()
+                    }
+                }
+            } else {
+                throw IllegalStateException("Unknown type: $that")
+            }
+        }
 
     override fun toString(): String {
         return name
@@ -396,12 +530,50 @@ data class KsConstructor(val name: String): KsType {
     }
 }
 fun KsConstructor(env: TypingEnvironment, name: String): KsType =
-    makeNormalized(::KsConstructor, name)
+    makeNormalized(env, ::KsConstructor, name)
 
 data class KsTypeApplication
-    internal constructor(val constructor: KsConstructor,
-                         val args: PersistentList<KsProjection>): KsType {
-    override fun normalizeStep(): KsType = when {
+    internal constructor(override val constructor: KsConstructor,
+                         val args: PersistentList<KsProjection>): KsBaseType {
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation =
+        with(env) {
+            when(that) {
+                is KsFlexible, is KsNullable, is KsUnion, is KsIntersection, is KsConstructor ->
+                    that.subtypingRelationTo(this@KsTypeApplication).invert()
+                is KsTypeApplication -> {
+                    when(constructor subtypingRelationTo that.constructor) {
+                        SubtypingRelation.Equivalent -> {
+                            var res = SubtypingRelation.Equivalent
+                            check (args.size == that.args.size)
+                            for ((l, r) in (args zip that.args)) {
+                                res = res and (l.inBound subtypingRelationTo r.inBound).invert()
+                                res = res and (l.outBound subtypingRelationTo r.outBound)
+                                if (res == SubtypingRelation.Unrelated) break
+                            }
+                            return res
+                        }
+                        SubtypingRelation.Supertype -> {
+                            val actualBase =
+                                that.constructor.getEffectiveSupertypeByConstructor(constructor)
+                            when (actualBase) {
+                                is KsConstructor -> SubtypingRelation.Supertype
+                                is KsTypeApplication -> {
+                                    val mappedBase = actualBase.remapTypeArguments(that)
+                                    check(mappedBase.constructor == constructor)
+                                    subtypingRelationTo(mappedBase) // recurse to equivalent case
+                                }
+                            }
+                        }
+                        SubtypingRelation.Subtype ->
+                            that.subtypingRelationTo(this@KsTypeApplication).invert()
+                        else -> SubtypingRelation.Unrelated
+                    }
+                }
+                //else -> throw IllegalStateException("Unrecognized type: $that")
+            }
+        }
+
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
         args.isEmpty() -> constructor
         else -> copy(constructor, args)
     }
@@ -413,32 +585,85 @@ data class KsTypeApplication
 fun KsTypeApplication(env: TypingEnvironment,
                       constructor: KsConstructor,
                       args: PersistentList<KsProjection>): KsType =
-    makeNormalized(::KsTypeApplication, constructor, args)
+    makeNormalized(env, ::KsTypeApplication, constructor, args)
 fun KsTypeApplication(env: TypingEnvironment,
                       constructor: KsConstructor,
                       vararg args: KsProjection): KsType =
     KsTypeApplication(env, constructor, persistentListOf(*args))
 
+class KsTypeBuilder(val env: TypingEnvironment) {
+    infix fun KsType.or(that: KsType) = KsUnion(env, this, that)
+    infix fun KsType.and(that: KsType) = KsIntersection(env, this, that)
+    operator fun KsType.rangeTo(that: KsType) = KsFlexible(env, this, that)
+
+    fun inp(type: KsType): KsProjection = KsProjection.In(type)
+    fun outp(type: KsType): KsProjection = KsProjection.Out(type)
+    fun invp(type: KsType): KsProjection = KsProjection(type)
+
+    val Star get() = KsProjection.Star
+    val Any get() = KsConstructor.Any
+    val Nothing get() = KsConstructor.Nothing
+
+    fun type(name: String): KsConstructor = KsConstructor(env, name) as KsConstructor
+    operator fun KsConstructor.invoke(vararg args: KsProjection): KsTypeApplication =
+        KsTypeApplication(env, this, *args) as KsTypeApplication
+
+    operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication =
+        KsTypeApplication(env, this,
+            args.asList().mapTo(persistentListOf()) { KsProjection(it) }) as KsTypeApplication
+
+    inline operator fun getValue(thisRef: Any?, prop: KProperty<*>): KsConstructor = type(prop.name)
+
+    val KsType.q get() = KsNullable(env, this)
+
+    inline infix fun KsType.subtypeOf(that: KsType): Boolean =
+        SubtypingRelation.Subtype in this.subtypingRelationTo(that)
+    inline infix fun KsType.supertypeOf(that: KsType): Boolean =
+        SubtypingRelation.Supertype in this.subtypingRelationTo(that)
+
+    inline infix fun KsType.subtypingRelationTo(that: KsType): SubtypingRelation =
+        this.subtypingRelationTo(env, that)
+}
+
 suspend fun main() {
     val env = object : TypingEnvironment() {
-        override fun KsConstructor.subtypeOf(that: KsConstructor) = false
+        override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation = when {
+            this == that -> SubtypingRelation.Equivalent
+            this == KsConstructor.Any -> SubtypingRelation.Supertype
+            this == KsConstructor.Nothing -> SubtypingRelation.Subtype
+            that == KsConstructor.Any -> SubtypingRelation.Subtype
+            that == KsConstructor.Nothing -> SubtypingRelation.Supertype
+            else -> SubtypingRelation.Unrelated
+        }
+
+        override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
+            if (that == KsConstructor.Any) return KsConstructor.Any
+            else throw IllegalStateException()
+        }
+
+        override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
+            return this
+        }
     }
-    println(
-        KsUnion(
-            env,
-            KsConstructor(env, "T"),
-            KsNullable(env, KsTypeApplication(env, KsConstructor("A"), KsProjection.Star)),
-        ),
-    )
-    println(
-        KsIntersection(
-            env,
-            KsUnion(
-                env,
-                KsConstructor(env, "T"),
-                KsNullable(env, KsTypeApplication(env, KsConstructor("A"), KsProjection.Star)),
-            ),
-            KsNullable(env, KsConstructor(env, "TT"))
-        )
-    )
+    with (KsTypeBuilder(env)) {
+        val T by this
+        val A by this
+        val TT by this
+
+        println(T or A(outp(T)))
+        println(T or A(outp(T)) or T.q)
+        println(T or A(Star).q)
+        println((T or A(Star).q) and TT)
+        println(A(Star) or A(T))
+        println(A(Star) and A(T))
+        println(A(TT) or A(T))
+        println(A(T) or A(T.q))
+        println((TT..TT.q.q.q.q.q) and T)
+
+        println(T subtypingRelationTo T.q)
+        println(T subtypingRelationTo (T or TT))
+        val a = T or Nothing.q
+        val b = T.q
+        println(a subtypingRelationTo b)
+    }
 }
