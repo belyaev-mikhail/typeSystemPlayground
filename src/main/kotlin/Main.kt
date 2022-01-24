@@ -1,6 +1,6 @@
+package org.jetbrains.kotlin.types.play
 
 import kotlinx.collections.immutable.*
-import kotlin.contracts.contract
 import kotlin.reflect.KClass
 import kotlin.reflect.KProperty
 
@@ -134,9 +134,11 @@ data class KsFlexible(val from: KsType, val to: KsType): KsType {
         return "${parenthesize(from)}..${parenthesize(to)}"
     }
 }
-fun KsFlexible(env: TypingEnvironment,
-               from: KsType,
-               to: KsType): KsType = makeNormalized(env, ::KsFlexible, from, to)
+fun KsFlexible(
+    environment: TypingEnvironment,
+    from: KsType,
+    to: KsType
+): KsType = makeNormalized(environment, ::KsFlexible, from, to)
 
 data class KsNullable(val base: KsType): KsType {
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with(env) {
@@ -151,10 +153,7 @@ data class KsNullable(val base: KsType): KsType {
 
     override fun normalizeWithStructure(env: TypingEnvironment): KsType = when(base) {
         is KsFlexible ->
-            makeNormalized(env, ::KsFlexible,
-                makeNormalized(env, ::KsNullable, base.from),
-                makeNormalized(env, ::KsNullable, base.to)
-            )
+            KsFlexible(env, KsNullable(env, base.from), KsNullable(env, base.to))
         is KsNullable -> base
         else -> this
     }
@@ -166,8 +165,7 @@ data class KsNullable(val base: KsType): KsType {
         val Nothing = KsNullable(KsConstructor.Nothing)
     }
 }
-fun KsNullable(env: TypingEnvironment,
-               base: KsType): KsType = makeNormalized(env, ::KsNullable, base)
+fun KsNullable(env: TypingEnvironment, base: KsType): KsType = makeNormalized(env, ::KsNullable, base)
 
 data class KsUnion(val args: PersistentSet<KsType>): KsType {
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with (env) {
@@ -215,9 +213,15 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
     }
 
     fun handleProjections(env: TypingEnvironment, i: Iterable<KsProjection>) = KsProjection(
-        inBound = makeNormalized(env, ::KsIntersection, i.mapTo(persistentHashSetOf()) { it.inBound }),
-        outBound = makeNormalized(env, ::KsUnion, i.mapTo(persistentHashSetOf()) { it.outBound })
+        inBound = KsIntersection(env, i.mapTo(persistentHashSetOf()) { it.inBound }),
+        outBound = KsUnion(env, i.mapTo(persistentHashSetOf()) { it.outBound })
     )
+
+    private fun make(args: PersistentSet<KsType>) = when(args.size) {
+        0 -> KsConstructor.Any
+        1 -> args.first()
+        else -> copy(args = args)
+    }
 
     override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
@@ -233,11 +237,16 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                     f += arg
                     nf += resArgs
                     // What?
-                    return makeNormalized(env, ::KsFlexible,
-                        makeNormalized(env, ::KsUnion, nf.build().addAll(
-                            f.mapTo(persistentHashSetBuilder()) { it.from })),
-                        makeNormalized(env, ::KsUnion, nf.build().addAll(
-                            f.mapTo(persistentHashSetBuilder()) { it.to }))
+                    return KsFlexible(
+                        env,
+                        KsUnion(
+                            env,
+                            nf.build() + f.mapTo(persistentHashSetBuilder()) { it.from }
+                        ),
+                        KsUnion(
+                            env,
+                            nf.build() + f.mapTo(persistentHashSetBuilder()) { it.to }
+                        )
                     )
                 }
                 is KsNullable -> {
@@ -245,12 +254,10 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                     n += arg
                     nn += resArgs
                     // What?
-                    return makeNormalized(
+                    return KsNullable(
                         env,
-                        ::KsNullable,
-                        makeNormalized(
+                        KsUnion(
                             env,
-                            ::KsUnion,
                             n.mapTo(persistentHashSetOf()) { it.base }.addAll(nn)
                         )
                     )
@@ -269,18 +276,16 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
 
                         @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
 
-                        val reviso = makeNormalized(
+                        val reviso = KsTypeApplication(
                             env,
-                            ::KsTypeApplication,
                             arg.constructor,
                             arg.args.indices.mapTo(persistentListOf()) { ix ->
                                 handleProjections(env, me.map { it.args[ix] })
                             }
                         )
 
-                        return makeNormalized(
+                        return KsUnion(
                             env,
-                            ::KsIntersection,
                             notMe.build().add(reviso)
                         )
                     }
@@ -289,13 +294,7 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
             }
 
         }
-        resArgs.build()
-        val finalArgs = resArgs.build()
-        return when {
-            finalArgs === args -> this
-            finalArgs.size == 1 -> finalArgs.single()
-            else -> KsUnion(resArgs.build())
-        }
+        return make(resArgs.build())
     }
 
     override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
@@ -306,9 +305,7 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
 
         val newArgs = args.removeAll(subtypes)
 
-        if (newArgs.size == 1) return newArgs.single()
-
-        return KsUnion(newArgs)
+        return make(newArgs)
     }
 
     override fun toString(): String {
@@ -366,9 +363,15 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
 
     fun handleProjections(env: TypingEnvironment, i: Iterable<KsProjection>) = KsProjection(
-        inBound = makeNormalized(env, ::KsUnion, i.mapTo(persistentHashSetOf()) { it.inBound }),
-        outBound = makeNormalized(env, ::KsIntersection, i.mapTo(persistentHashSetOf()) { it.outBound })
+        inBound = KsUnion(env, i.mapTo(persistentHashSetOf()) { it.inBound }),
+        outBound = KsUnion(env, i.mapTo(persistentHashSetOf()) { it.outBound })
     )
+
+    private fun make(args: PersistentSet<KsType>) = when(args.size) {
+        0 -> KsConstructor.Any
+        1 -> args.first()
+        else -> copy(args = args)
+    }
 
     override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
@@ -384,10 +387,11 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                     f += arg
                     nf += resArgs
                     // What?
-                    return makeNormalized(env, ::KsFlexible,
-                        makeNormalized(env, ::KsIntersection, nf.build().addAll(
+                    return KsFlexible(
+                        env,
+                        KsIntersection(env, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.from })),
-                        makeNormalized(env, ::KsIntersection, nf.build().addAll(
+                        KsIntersection(env, nf.build().addAll(
                             f.mapTo(persistentHashSetBuilder()) { it.to }))
                     )
                 }
@@ -396,12 +400,11 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                     u += arg
                     nu += resArgs
 
-                    return makeNormalized(env, ::KsUnion,
-                        u.map { it.args }
-                            .productTo(persistentHashSetOf())
-                            .mapTo(persistentHashSetOf()) {
-                                makeNormalized(env, ::KsIntersection, it.addAll(nu))
-                            }
+                    return KsUnion(env, u.map { it.args }
+                        .productTo(persistentHashSetOf())
+                        .mapTo(persistentHashSetOf()) {
+                            makeNormalized(env, ::KsIntersection, it.addAll(nu))
+                        }
                     )
                 }
                 is KsNullable -> {
@@ -412,17 +415,14 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                     val banged = n.mapTo(persistentHashSetOf()) { it.base }
 
                     if (nn.isNotEmpty())
-                        return makeNormalized(
+                        return KsIntersection(
                             env,
-                            ::KsIntersection,
                             banged.addAll(nn)
                         )
-                    else return makeNormalized(
+                    else return KsNullable(
                         env,
-                        ::KsNullable,
-                        makeNormalized(
+                        KsIntersection(
                             env,
-                            ::KsIntersection,
                             banged
                         )
                     )
@@ -440,16 +440,15 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
                         @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
 
-                        val reviso = makeNormalized(env,
-                            ::KsTypeApplication,
+                        val reviso = KsTypeApplication(env,
                             arg.constructor,
                             arg.args.indices.mapTo(persistentListOf()) { ix ->
                                 handleProjections(env, me.map { it.args[ix] })
                             }
                         )
 
-                        return makeNormalized(env,
-                            ::KsIntersection,
+                        return KsIntersection(
+                            env,
                             notMe.build().add(reviso)
                         )
                     }
@@ -459,13 +458,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
             }
 
         }
-        resArgs.build()
-        val finalArgs = resArgs.build()
-        return when {
-            finalArgs === args -> this
-            finalArgs.size == 1 -> finalArgs.single()
-            else -> KsIntersection(resArgs.build())
-        }
+        return make(resArgs.build())
     }
 
     override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
@@ -476,9 +469,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
         val newArgs = args.removeAll(supertypes)
 
-        if (newArgs.size == 1) return newArgs.single()
-
-        return KsIntersection(newArgs)
+        return make(newArgs)
     }
 
     override fun toString(): String {
@@ -670,7 +661,12 @@ suspend fun main() {
 
         checkEquals(KsUnion(persistentHashSetOf(T, A(outp(T)))), T or A(outp(T)))
         checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(outp(T))))), T or A(outp(T)) or T.q)
-        println(T or A(Star).q)
+        checkEquals(T, T or T)
+        checkEquals(T, T and T)
+        checkEquals(T and TT, TT and T)
+        checkEquals(T.q, T.q.q.q.q.q)
+        checkEquals(T or TT or A, TT or A or T)
+        checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(Star)))), T or A(Star).q)
         println((T or A(Star).q) and TT)
         println(A(Star) or A(T))
         println(A(Star) and A(T))
@@ -682,7 +678,7 @@ suspend fun main() {
         println(T subtypingRelationTo (T or TT))
         val a = T or Nothing.q
         val b = T.q
-        println(a subtypingRelationTo b)
+        checkEquals(SubtypingRelation.Equivalent, a subtypingRelationTo b)
 
         println((TT or T) subtypingRelationTo (T.q))
 
