@@ -1,5 +1,6 @@
 
 import kotlinx.collections.immutable.*
+import kotlin.contracts.contract
 import kotlin.reflect.KClass
 import kotlin.reflect.KProperty
 
@@ -37,6 +38,8 @@ enum class SubtypingRelation {
     }
 }
 
+enum class Variance { Covariant, Contravariant, Invariant }
+
 sealed interface KsType {
     fun normalizeWithStructure(env: TypingEnvironment): KsType
     fun normalizeWithSubtyping(env: TypingEnvironment): KsType = this
@@ -66,6 +69,8 @@ abstract class TypingEnvironment {
 
     abstract fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType
     abstract fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication
+
+    abstract fun declsiteVariance(constructor: KsConstructor, index: Int): Variance
 }
 
 inline fun <reified T: KsType, Arg> makeNormalized(env: TypingEnvironment,
@@ -625,6 +630,15 @@ class KsTypeBuilder(val env: TypingEnvironment) {
         this.subtypingRelationTo(env, that)
 }
 
+inline fun <T> checkEquals(expected: T, actual: T) {
+    check(expected == actual) {
+        """ |Equality comparison failed:
+            |Expected: $expected
+            |Actual: $actual
+        """.trimMargin()
+    }
+}
+
 suspend fun main() {
     val env = object : TypingEnvironment() {
         override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation = when {
@@ -644,14 +658,18 @@ suspend fun main() {
         override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
             return this
         }
+
+        override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
+            return Variance.Invariant
+        }
     }
     with (KsTypeBuilder(env)) {
         val T by this
         val A by this
         val TT by this
 
-        println(T or A(outp(T)))
-        println(T or A(outp(T)) or T.q)
+        checkEquals(KsUnion(persistentHashSetOf(T, A(outp(T)))), T or A(outp(T)))
+        checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(outp(T))))), T or A(outp(T)) or T.q)
         println(T or A(Star).q)
         println((T or A(Star).q) and TT)
         println(A(Star) or A(T))
@@ -665,5 +683,11 @@ suspend fun main() {
         val a = T or Nothing.q
         val b = T.q
         println(a subtypingRelationTo b)
+
+        println((TT or T) subtypingRelationTo (T.q))
+
+        println((T and TT) subtypingRelationTo (T or TT))
+
+        println(A(inp(T)) and A(inp(TT)))
     }
 }
