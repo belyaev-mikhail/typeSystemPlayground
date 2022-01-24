@@ -630,30 +630,32 @@ inline fun <T> checkEquals(expected: T, actual: T) {
     }
 }
 
-suspend fun main() {
-    val env = object : TypingEnvironment() {
-        override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation = when {
-            this == that -> SubtypingRelation.Equivalent
-            this == KsConstructor.Any -> SubtypingRelation.Supertype
-            this == KsConstructor.Nothing -> SubtypingRelation.Subtype
-            that == KsConstructor.Any -> SubtypingRelation.Subtype
-            that == KsConstructor.Nothing -> SubtypingRelation.Supertype
-            else -> SubtypingRelation.Unrelated
-        }
-
-        override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
-            if (that == KsConstructor.Any) return KsConstructor.Any
-            else throw IllegalStateException()
-        }
-
-        override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
-            return this
-        }
-
-        override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
-            return Variance.Invariant
-        }
+object EmptyEnvironment: TypingEnvironment() {
+    override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation = when {
+        this == that -> SubtypingRelation.Equivalent
+        this == KsConstructor.Any -> SubtypingRelation.Supertype
+        this == KsConstructor.Nothing -> SubtypingRelation.Subtype
+        that == KsConstructor.Any -> SubtypingRelation.Subtype
+        that == KsConstructor.Nothing -> SubtypingRelation.Supertype
+        else -> SubtypingRelation.Unrelated
     }
+
+    override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
+        if (that == KsConstructor.Any) return KsConstructor.Any
+        else throw IllegalStateException()
+    }
+
+    override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
+        return this
+    }
+
+    override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
+        return Variance.Invariant
+    }
+}
+
+suspend fun main() {
+    val env = EmptyEnvironment
     with (KsTypeBuilder(env)) {
         val T by this
         val A by this
