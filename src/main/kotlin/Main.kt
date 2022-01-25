@@ -654,6 +654,89 @@ object EmptyEnvironment: TypingEnvironment() {
     }
 }
 
+class MapToSet<K, V>(val inner: MutableMap<K, MutableSet<V>> = mutableMapOf()): Map<K, MutableSet<V>> by inner {
+    override fun get(key: K): MutableSet<V> = inner.getOrPut(key) { mutableSetOf() }
+    override fun getOrDefault(key: K, defaultValue: MutableSet<V>): MutableSet<V> =
+        inner.getOrDefault(key, defaultValue)
+
+    override fun equals(other: Any?): Boolean = inner.equals(other)
+    override fun hashCode(): Int = inner.hashCode()
+    override fun toString(): String = inner.toString()
+}
+
+class DeclEnvironment: TypingEnvironment() {
+    data class KsTypeParameter(
+        val variance: Variance,
+        val constructor: KsConstructor,
+        val bounds: PersistentSet<KsType>
+    )
+    data class KsTypeDecl(
+        val constructor: KsConstructor,
+        val arguments: List<KsConstructor>,
+        val supertypes: PersistentMap<KsConstructor, KsBaseType>
+    )
+
+    val declarations: Map<KsConstructor, KsTypeDecl> = mutableMapOf()
+
+    val subtypingCache: MapToSet<KsConstructor, KsConstructor> = MapToSet()
+    fun <T> KsConstructor.forEachSupertype(
+        localCache: PersistentSet.Builder<KsConstructor> = persistentHashSetBuilder(),
+        globalCache: PersistentSet.Builder<KsConstructor> = persistentHashSetBuilder(),
+        body: (KsBaseType) -> T?): T? {
+
+        val decl = declarations[this] ?: return null
+        for (it in decl.supertypes.keys) {
+            if (it in globalCache) continue
+            body(it)?.let { return it }
+            localCache += it
+            globalCache += it
+            val newCache = persistentHashSetBuilder<KsConstructor>()
+            val subTrees = it.forEachSupertype(newCache, globalCache, body)
+            subtypingCache[it] += newCache
+            globalCache += newCache
+            localCache += newCache
+            if (subTrees != null) return subTrees
+        }
+        return null
+    }
+
+    fun calcSubtypingRelation(from: KsConstructor, to: KsConstructor): SubtypingRelation {
+        if (from == to) return SubtypingRelation.Equivalent
+        if (to in subtypingCache[from]) return SubtypingRelation.Subtype
+        if (from in subtypingCache[to]) return SubtypingRelation.Supertype
+
+        from.forEachSupertype {
+            it.takeIf { it == to }
+        }?.let { return SubtypingRelation.Subtype }
+        to.forEachSupertype {
+            it.takeIf { it == from }
+        }?.let { return SubtypingRelation.Supertype }
+        return SubtypingRelation.Unrelated
+    }
+
+    override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation = when {
+        this == that -> SubtypingRelation.Equivalent
+        this == KsConstructor.Any -> SubtypingRelation.Supertype
+        this == KsConstructor.Nothing -> SubtypingRelation.Subtype
+        that == KsConstructor.Any -> SubtypingRelation.Subtype
+        that == KsConstructor.Nothing -> SubtypingRelation.Supertype
+        else -> calcSubtypingRelation(this, that)
+    }
+
+    override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
+        if (that == KsConstructor.Any) return KsConstructor.Any
+        else throw IllegalStateException()
+    }
+
+    override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
+        return this
+    }
+
+    override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
+        return Variance.Invariant
+    }
+}
+
 suspend fun main() {
     val env = EmptyEnvironment
     with (KsTypeBuilder(env)) {
