@@ -364,7 +364,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
 
     fun handleProjections(env: TypingEnvironment, i: Iterable<KsProjection>) = KsProjection(
         inBound = KsUnion(env, i.mapTo(persistentHashSetOf()) { it.inBound }),
-        outBound = KsUnion(env, i.mapTo(persistentHashSetOf()) { it.outBound })
+        outBound = KsIntersection(env, i.mapTo(persistentHashSetOf()) { it.outBound })
     )
 
     private fun make(args: PersistentSet<KsType>) = when(args.size) {
@@ -592,6 +592,9 @@ class KsTypeBuilder(val env: TypingEnvironment) {
     infix fun KsType.and(that: KsType) = KsIntersection(env, this, that)
     operator fun KsType.rangeTo(that: KsType) = KsFlexible(env, this, that)
 
+    fun union(vararg args: KsType) = KsUnion(env, *args)
+    fun intersect(vararg args: KsType) = KsIntersection(env, *args)
+
     fun inp(type: KsType): KsProjection = KsProjection.In(type)
     fun outp(type: KsType): KsProjection = KsProjection.Out(type)
     fun invp(type: KsType): KsProjection = KsProjection(type)
@@ -752,22 +755,41 @@ suspend fun main() {
         checkEquals(T.q, T.q.q.q.q.q)
         checkEquals(T or TT or A, TT or A or T)
         checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(Star)))), T or A(Star).q)
-        println((T or A(Star).q) and TT)
-        println(A(Star) or A(T))
-        println(A(Star) and A(T))
+        checkEquals(
+            KsUnion(
+                persistentHashSetOf(
+                    KsIntersection(
+                        persistentHashSetOf(TT, T)
+                    ),
+                    KsIntersection(
+                        persistentHashSetOf(TT, A(Star))
+                    )
+                )
+            ),
+            (T or A(Star).q) and TT
+        )
+        checkEquals(
+            A(Star),
+            A(Star) or A(T)
+        )
+        checkEquals(
+            A(T),
+            A(Star) and A(T)
+        )
         println(A(TT) or A(T))
         println(A(T) or A(T.q))
-        println((TT..TT.q.q.q.q.q) and T)
+        println(A(T) and A(T.q))
+        checkEquals(TT and T, (TT..TT.q.q.q.q.q) and T)
+        checkEquals(TT, TT and TT)
 
-        println(T subtypingRelationTo T.q)
-        println(T subtypingRelationTo (T or TT))
         val a = T or Nothing.q
         val b = T.q
+        checkEquals(SubtypingRelation.Subtype, T subtypingRelationTo a)
+        checkEquals(SubtypingRelation.Subtype, T subtypingRelationTo a)
         checkEquals(SubtypingRelation.Equivalent, a subtypingRelationTo b)
+        checkEquals(SubtypingRelation.Unrelated, (TT or T) subtypingRelationTo (T.q))
 
-        println((TT or T) subtypingRelationTo (T.q))
-
-        println((T and TT) subtypingRelationTo (T or TT))
+        checkEquals(SubtypingRelation.Subtype, (T and TT) subtypingRelationTo (T or TT))
 
         println(A(inp(T)) and A(inp(TT)))
     }
