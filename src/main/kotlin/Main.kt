@@ -782,12 +782,14 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType
     }
 }
 
+inline fun <C, T> withContext(context: C, body: context(C) () -> T ) = body(context)
+
 suspend fun main() {
     val env = EmptyEnvironment
     with (env) {
-        val T by this
-        val A by this
-        val TT by this
+        val T by env
+        val A by env
+        val TT by env
 
         checkEquals(KsUnion(persistentHashSetOf(T, A(outp(T)))), T or A(outp(T)))
         checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(outp(T))))), T or A(outp(T)) or T.q)
