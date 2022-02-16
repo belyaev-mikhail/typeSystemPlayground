@@ -6,7 +6,7 @@ import kotlin.test.*
 class Main {
     @Test
     fun smokeTest() {
-        with(KsTypeBuilder(EmptyEnvironment)) {
+        with(EmptyEnvironment) {
             val T by this
             val A by this
             val TT by this

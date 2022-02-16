@@ -597,42 +597,71 @@ fun KsTypeApplication(env: TypingEnvironment,
                       vararg args: KsProjection): KsType =
     KsTypeApplication(env, constructor, persistentListOf(*args))
 
-class KsTypeBuilder(val env: TypingEnvironment) {
-    infix fun KsType.or(that: KsType) = KsUnion(env, this, that)
-    infix fun KsType.and(that: KsType) = KsIntersection(env, this, that)
-    operator fun KsType.rangeTo(that: KsType) = KsFlexible(env, this, that)
+context(TypingEnvironment)
+inline val env get() = this@TypingEnvironment
+//class KsTypeBuilder(val env: TypingEnvironment) {
+context(TypingEnvironment)
+infix fun KsType.or(that: KsType) = KsUnion(env, this, that)
+context(TypingEnvironment)
+infix fun KsType.and(that: KsType) = KsIntersection(env, this, that)
+context(TypingEnvironment)
+operator fun KsType.rangeTo(that: KsType) = KsFlexible(env, this, that)
 
-    fun union(vararg args: KsType) = KsUnion(env, *args)
-    fun intersect(vararg args: KsType) = KsIntersection(env, *args)
+context(TypingEnvironment)
+fun union(vararg args: KsType) = KsUnion(env, *args)
 
-    fun inp(type: KsType): KsProjection = KsProjection.In(type)
-    fun outp(type: KsType): KsProjection = KsProjection.Out(type)
-    fun invp(type: KsType): KsProjection = KsProjection(type)
+context(TypingEnvironment)
+fun intersect(vararg args: KsType) = KsIntersection(env, *args)
 
-    val Star get() = KsProjection.Star
-    val Any get() = KsConstructor.Any
-    val Nothing get() = KsConstructor.Nothing
+context(TypingEnvironment)
+fun inp(type: KsType): KsProjection = KsProjection.In(type)
 
-    fun type(name: String): KsConstructor = KsConstructor(env, name) as KsConstructor
-    operator fun KsConstructor.invoke(vararg args: KsProjection): KsTypeApplication =
-        KsTypeApplication(env, this, *args) as KsTypeApplication
+context(TypingEnvironment)
+fun outp(type: KsType): KsProjection = KsProjection.Out(type)
 
-    operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication =
-        KsTypeApplication(env, this,
-            args.asList().mapTo(persistentListOf()) { KsProjection(it) }) as KsTypeApplication
+context(TypingEnvironment)
+fun invp(type: KsType): KsProjection = KsProjection(type)
 
-    inline operator fun getValue(thisRef: Any?, prop: KProperty<*>): KsConstructor = type(prop.name)
+context(TypingEnvironment)
+val Star get() = KsProjection.Star
 
-    val KsType.q get() = KsNullable(env, this)
+context(TypingEnvironment)
+val Any get() = KsConstructor.Any
 
-    inline infix fun KsType.subtypeOf(that: KsType): Boolean =
-        SubtypingRelation.Subtype in this.subtypingRelationTo(that)
-    inline infix fun KsType.supertypeOf(that: KsType): Boolean =
-        SubtypingRelation.Supertype in this.subtypingRelationTo(that)
+context(TypingEnvironment)
+val Nothing get() = KsConstructor.Nothing
 
-    inline infix fun KsType.subtypingRelationTo(that: KsType): SubtypingRelation =
-        this.subtypingRelationTo(env, that)
-}
+context(TypingEnvironment)
+fun type(name: String): KsConstructor = KsConstructor(env, name) as KsConstructor
+
+context(TypingEnvironment)
+operator fun KsConstructor.invoke(vararg args: KsProjection): KsTypeApplication =
+    KsTypeApplication(env, this, *args) as KsTypeApplication
+
+context(TypingEnvironment)
+operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication =
+    KsTypeApplication(env, this,
+        args.asList().mapTo(persistentListOf()) { KsProjection(it) }) as KsTypeApplication
+
+inline operator fun TypingEnvironment.getValue(thisRef: Any?, prop: KProperty<*>): KsConstructor =
+    type(prop.name)
+
+context(TypingEnvironment)
+val KsType.q get() = KsNullable(env, this)
+
+context(TypingEnvironment)
+inline infix fun KsType.subtypeOf(that: KsType): Boolean =
+    SubtypingRelation.Subtype in this.subtypingRelationTo(that)
+
+context(TypingEnvironment)
+inline infix fun KsType.supertypeOf(that: KsType): Boolean =
+    SubtypingRelation.Supertype in this.subtypingRelationTo(that)
+
+context(TypingEnvironment)
+inline infix fun KsType.subtypingRelationTo(that: KsType): SubtypingRelation =
+    this.subtypingRelationTo(env, that)
+//}
+
 
 inline fun <T> checkEquals(expected: T, actual: T) {
     check(expected == actual) {
@@ -755,7 +784,7 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType
 
 suspend fun main() {
     val env = EmptyEnvironment
-    with (KsTypeBuilder(env)) {
+    with (env) {
         val T by this
         val A by this
         val TT by this
