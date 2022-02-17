@@ -29,6 +29,9 @@ class Main {
                 ),
                 (TT or A) and T
             )
+
+            assertEquals(T or Nothing.q, T.q)
+            assertEquals(Nothing.q or T, T.q)
         }
     }
 }

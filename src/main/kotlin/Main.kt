@@ -745,9 +745,19 @@ class DeclEnvironment: TypingEnvironment() {
     }
 
     override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
-        check(constructor == subtype.constructor)
+        var me: KsType = this
+        val originalDecl = decls[subtype.constructor] ?: throw IllegalArgumentException()
+        val originalParams = originalDecl.params
 
-        TODO("Not yet implemented")
+        check(originalParams.size == subtype.args.size)
+
+        for((p, a) in originalParams.zip(subtype.args)) {
+            me = me.replace(this@DeclEnvironment, p.constructor, a)
+        }
+
+        check(me is KsTypeApplication)
+
+        return me
     }
 
     override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
@@ -756,21 +766,28 @@ class DeclEnvironment: TypingEnvironment() {
 
 }
 
-fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType): KsType {
+fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsType {
     fun KsType.replace(): KsType = replace(env, what, withWhat)
     return when(this) {
-        what -> withWhat
+        what -> withWhat.outBound
         is KsConstructor -> what
         is KsTypeApplication ->
             when (constructor) {
-                what -> withWhat
+                what -> withWhat.outBound
                 else -> KsTypeApplication(
                     env,
                     constructor,
                     args.mapTo(persistentListOf()) {
-                        KsProjection(
-                            outBound = it.outBound.replace(),
-                            inBound = it.inBound.replace()
+                        if (it == KsProjection.Star) it
+                        else KsProjection(
+                            outBound = when (val outBound = it.outBound) {
+                                what -> withWhat.outBound
+                                else -> outBound.replace()
+                            },
+                            inBound = when (val inBound = it.inBound) {
+                                what -> withWhat.inBound
+                                else -> inBound.replace()
+                            },
                         )
                     }
                 )
@@ -781,6 +798,9 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType
         is KsNullable -> KsNullable(env, base.replace())
     }
 }
+
+fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType): KsType =
+    replace(env, what, KsProjection(withWhat))
 
 inline fun <C, T> withContext(context: C, body: context(C) () -> T ) = body(context)
 
@@ -822,6 +842,7 @@ suspend fun main() {
         )
         println(A(TT) or A(T))
         println(A(T) or A(T.q))
+
         println(A(T) and A(T.q))
         checkEquals(TT and T, (TT..TT.q.q.q.q.q) and T)
         checkEquals(TT, TT and TT)
