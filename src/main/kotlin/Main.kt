@@ -443,6 +443,8 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                         it.constructor == arg.constructor
                     }
 
+                    // FIXME
+                    TODO()
                     if (me.isEmpty()) handleArg(arg, resArgs)
                     else {
                         me += arg
@@ -704,8 +706,8 @@ class DeclEnvironment: TypingEnvironment() {
 
     data class KsTypeParameter(
         val constructor: KsConstructor,
-        val variance: Variance,
-        val bounds: PersistentSet<KsType>
+        val variance: Variance = Variance.Invariant,
+        val bounds: PersistentSet<KsType> = persistentHashSetOf()
     )
 
     data class KsTypeDeclaration(
@@ -805,7 +807,7 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType
 inline fun <C, T> withContext(context: C, body: context(C) () -> T ) = body(context)
 
 suspend fun main() {
-    val env = EmptyEnvironment
+    val env = DeclEnvironment()
     with (env) {
         val T by env
         val A by env
@@ -855,6 +857,28 @@ suspend fun main() {
         checkEquals(SubtypingRelation.Unrelated, (TT or T) subtypingRelationTo (T.q))
 
         checkEquals(SubtypingRelation.Subtype, (T and TT) subtypingRelationTo (T or TT))
+
+        val List by env
+        val MutableList by env
+
+        addDeclaration(
+            DeclEnvironment.KsTypeDeclaration(
+                List,
+                persistentListOf(DeclEnvironment.KsTypeParameter(T, Variance.Covariant)),
+                persistentHashSetOf()
+            )
+        )
+
+        addDeclaration(
+            DeclEnvironment.KsTypeDeclaration(
+                MutableList,
+                persistentListOf(DeclEnvironment.KsTypeParameter(T)),
+                persistentHashSetOf(List(outp(T)))
+            )
+        )
+
+        checkEquals(List(TT), List(TT) or MutableList(TT))
+        checkEquals(MutableList(TT), List(TT) and MutableList(TT))
 
         println(A(inp(T)) and A(inp(TT)))
     }
