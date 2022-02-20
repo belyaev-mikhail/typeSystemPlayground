@@ -17,6 +17,13 @@ tasks.withType<KotlinCompile> {
     }
 }
 
+val execute by tasks.creating(JavaExec::class) {
+    val main by sourceSets
+    classpath = main.runtimeClasspath
+    var mainClass by mainClass
+    mainClass = "org.jetbrains.kotlin.types.play.MainKt"
+}
+
 dependencies {
     implementation(kotlin("stdlib"))
     implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.3.4")

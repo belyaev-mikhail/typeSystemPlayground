@@ -117,6 +117,12 @@ data class KsProjection(val outBound: KsType, val inBound: KsType = outBound) {
     }
 }
 
+fun KsProjection(variance: Variance, type: KsType) = when(variance) {
+    Variance.Covariant -> KsProjection.Out(type)
+    Variance.Contravariant -> KsProjection.In(type)
+    Variance.Invariant -> KsProjection(type)
+}
+
 data class KsFlexible(val from: KsType, val to: KsType): KsType {
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation {
         if (that is KsFlexible) {
@@ -274,31 +280,46 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                 }
 
                 is KsTypeApplication -> {
-                    val (me, notMe) = iterator.partitionTo(
-                        persistentHashSetBuilder(),
-                        persistentHashSetBuilder(),
-                    ) { it is KsTypeApplication && it.constructor == arg.constructor }
+                    val (generics, notGenerics) = iterator.partitionInstanceOf(KsTypeApplication::class)
 
-                    if (me.isEmpty()) handleArg(arg, resArgs)
-                    else {
-                        me += arg
-                        notMe += resArgs
+                    generics += arg
+                    notGenerics += resArgs
 
-                        @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
-
-                        val reviso = KsTypeApplication(
-                            env,
-                            arg.constructor,
-                            arg.args.indices.mapTo(persistentListOf()) { ix ->
-                                handleProjections(env, me.map { it.args[ix] })
+                    val nonAppUnion = when {
+                        notGenerics.isEmpty() -> null
+                        else -> when (val res = KsUnion(env, notGenerics.build())) {
+                            is KsTypeApplication -> {
+                                generics += res
+                                null
                             }
-                        )
-
-                        return KsUnion(
-                            env,
-                            notMe.build().add(reviso)
-                        )
+                            else -> res
+                        }
                     }
+
+                    val byConstructor = generics.groupByTo(mutableMapOf()) { it.constructor }
+                    val applications = byConstructor.mapTo(persistentHashSetBuilder()) { (c, g) ->
+                        val representative = g.first()
+                        if (g.size > 1) {
+                            KsTypeApplication(
+                                env,
+                                c,
+                                representative.args.indices.mapTo(persistentListOf()) { ix ->
+                                    handleProjections(env, g.map { it.args[ix] })
+                                }
+                            )
+                        } else representative
+                    }
+
+                    val appUnion = make(applications.build())
+                    if (nonAppUnion == null) return appUnion
+
+                    // fragile: we may get results that are exactly ones we had in the first place,
+                    // resulting in infinite recursion
+                    if (appUnion in args && nonAppUnion in args) {
+                        return make(persistentHashSetOf(appUnion, nonAppUnion))
+                    }
+
+                    return KsUnion(env, appUnion, nonAppUnion)
                 }
                 else -> handleArg(arg, resArgs)
             }
@@ -439,31 +460,46 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
                 }
 
                 is KsTypeApplication -> {
-                    val (me, notMe) = iterator.partitionInstanceOf(KsTypeApplication::class) {
-                        it.constructor == arg.constructor
-                    }
+                    val (generics, notGenerics) = iterator.partitionInstanceOf(KsTypeApplication::class)
 
-                    // FIXME
-                    TODO()
-                    if (me.isEmpty()) handleArg(arg, resArgs)
-                    else {
-                        me += arg
-                        notMe += resArgs
+                    generics += arg
+                    notGenerics += resArgs
 
-                        @Suppress("UNCHECKED_CAST") (me as PersistentSet.Builder<KsTypeApplication>)
-
-                        val reviso = KsTypeApplication(env,
-                            arg.constructor,
-                            arg.args.indices.mapTo(persistentListOf()) { ix ->
-                                handleProjections(env, me.map { it.args[ix] })
+                    val nonAppIntersection = when {
+                        notGenerics.isEmpty() -> null
+                        else -> when (val res = KsIntersection(env, notGenerics.build())) {
+                            is KsTypeApplication -> {
+                                generics += res
+                                null
                             }
-                        )
-
-                        return KsIntersection(
-                            env,
-                            notMe.build().add(reviso)
-                        )
+                            else -> res
+                        }
                     }
+
+                    val byConstructor = generics.groupByTo(mutableMapOf()) { it.constructor }
+                    val applications = byConstructor.mapTo(persistentHashSetBuilder()) { (c, g) ->
+                        val representative = g.first()
+                        if (g.size > 1) {
+                            KsTypeApplication(
+                                env,
+                                c,
+                                representative.args.indices.mapTo(persistentListOf()) { ix ->
+                                    handleProjections(env, g.map { it.args[ix] })
+                                }
+                            )
+                        } else representative
+                    }
+
+                    val appIntersection = make(applications.build())
+                    if (nonAppIntersection == null) return appIntersection
+
+                    // fragile: we may get results that are exactly ones we had in the first place,
+                    // resulting in infinite recursion
+                    if (appIntersection in args && nonAppIntersection in args) {
+                        return make(persistentHashSetOf(appIntersection, nonAppIntersection))
+                    }
+
+                    return KsIntersection(env, appIntersection, nonAppIntersection)
                 }
 
                 else -> handleArg(arg, resArgs)
@@ -568,7 +604,8 @@ data class KsTypeApplication
                                 is KsTypeApplication -> {
                                     val mappedBase = actualBase.remapTypeArguments(that)
                                     check(mappedBase.constructor == constructor)
-                                    subtypingRelationTo(mappedBase) // recurse to equivalent case
+                                    val eqCase = subtypingRelationTo(mappedBase) // recurse to equivalent case
+                                    eqCase and SubtypingRelation.Supertype
                                 }
                             }
                         }
@@ -641,9 +678,14 @@ operator fun KsConstructor.invoke(vararg args: KsProjection): KsTypeApplication 
     KsTypeApplication(env, this, *args) as KsTypeApplication
 
 context(TypingEnvironment)
-operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication =
-    KsTypeApplication(env, this,
-        args.asList().mapTo(persistentListOf()) { KsProjection(it) }) as KsTypeApplication
+operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication {
+    val argsWithVariance = args.withIndex().mapTo(persistentListOf()) { (i, it) ->
+        KsProjection(declsiteVariance(this, i), it)
+    }
+    val result = KsTypeApplication(env, this, argsWithVariance)
+    check(result is KsTypeApplication)
+    return result
+}
 
 inline operator fun TypingEnvironment.getValue(thisRef: Any?, prop: KProperty<*>): KsConstructor =
     type(prop.name)
@@ -736,7 +778,7 @@ class DeclEnvironment: TypingEnvironment() {
         if (thisSupertypes.any { it.constructor == that })
             return SubtypingRelation.Subtype
 
-        if (thatSupertypes.any { it.constructor == that })
+        if (thatSupertypes.any { it.constructor == this })
             return SubtypingRelation.Supertype
 
         return SubtypingRelation.Unrelated
@@ -763,7 +805,7 @@ class DeclEnvironment: TypingEnvironment() {
     }
 
     override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
-        return decls[constructor]?.params?.get(index)?.variance ?: throw NoSuchElementException()
+        return decls[constructor]?.params?.get(index)?.variance ?: Variance.Invariant // for underdefined environments
     }
 
 }
@@ -772,7 +814,7 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsProj
     fun KsType.replace(): KsType = replace(env, what, withWhat)
     return when(this) {
         what -> withWhat.outBound
-        is KsConstructor -> what
+        is KsConstructor -> this
         is KsTypeApplication ->
             when (constructor) {
                 what -> withWhat.outBound
@@ -869,6 +911,8 @@ suspend fun main() {
             )
         )
 
+        checkEquals(List(outp(T)), List(T)) // variance injection check
+
         addDeclaration(
             DeclEnvironment.KsTypeDeclaration(
                 MutableList,
@@ -877,8 +921,15 @@ suspend fun main() {
             )
         )
 
+        println(List(TT))
+        println(List(List(TT)))
+        println(MutableList(MutableList(TT)))
+
+        println(List(TT) subtypingRelationTo MutableList(TT))
         checkEquals(List(TT), List(TT) or MutableList(TT))
+
         checkEquals(MutableList(TT), List(TT) and MutableList(TT))
+        checkEquals(MutableList(MutableList(TT)), List(List(TT)) and MutableList(MutableList(TT)))
 
         println(A(inp(T)) and A(inp(TT)))
     }
