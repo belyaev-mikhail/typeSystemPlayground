@@ -1,8 +1,7 @@
 package org.jetbrains.kotlin.types.play
 
 import kotlinx.collections.immutable.*
-import kotlin.reflect.KClass
-import kotlin.reflect.KProperty
+import kotlin.reflect.*
 
 enum class SubtypingRelation {
 
@@ -764,6 +763,54 @@ class DeclEnvironment: TypingEnvironment() {
         // TODO: remap all supertypes, for now you have to specify them explicitly
         decls[decl.constructor] = decl
     }
+    private fun inject(kClass: KClassifier): KsType = when(kClass) {
+        is KClass<*> -> {
+            addDeclaration(kClass)
+            KsConstructor(env, kClass.qualifiedName!!)
+        }
+        is KTypeParameter -> KsConstructor(env, kClass.name)
+        else -> TODO()
+    }
+    private fun inject(variance: KVariance): Variance = when(variance) {
+        KVariance.INVARIANT -> Variance.Invariant
+        KVariance.IN -> Variance.Contravariant
+        KVariance.OUT -> Variance.Covariant
+    }
+    private fun inject(tp: KTypeParameter): KsTypeParameter =
+            KsTypeParameter(
+                KsConstructor(tp.name),
+                inject(tp.variance),
+                tp.upperBounds.mapTo(persistentHashSetOf()) { inject(it) }
+            )
+    private fun inject(ktype: KType): KsType {
+        var res: KsType = inject(ktype.classifier!!)
+        if (ktype.arguments.isNotEmpty()) {
+            res = KsTypeApplication(this, res as KsConstructor, ktype.arguments.mapTo(persistentListOf()) { (variance, type) ->
+                if (variance == null || type == null) KsProjection.Star
+                else KsProjection(inject(variance), inject(type))
+            })
+        }
+        if (ktype.isMarkedNullable) {
+            res = KsNullable(this, res)
+        }
+        return res
+    }
+    private val declarationStubs: MutableSet<KsConstructor> = mutableSetOf()
+    fun addDeclaration(kClass: KClass<*>) {
+        val constructor = KsConstructor(kClass.qualifiedName!!)
+        if (constructor in decls || constructor in declarationStubs) return
+        declarationStubs.add(constructor)
+        val params = kClass.typeParameters.mapTo(persistentListOf()) { inject(it) }
+        // TODO: remap all supertypes
+        val supertypes = kClass.supertypes.mapTo(persistentHashSetOf()) { inject(it) as KsBaseType }
+        addDeclaration(KsTypeDeclaration(constructor, params, supertypes))
+        declarationStubs.remove(constructor)
+    }
+
+    operator fun KClass<*>.getValue(thisRef: Any?, kProperty: KProperty<*>): KsConstructor {
+        addDeclaration(this)
+        return KsConstructor(qualifiedName!!)
+    }
 
     override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation {
         val tryEmpty = defaultSubtypingRelation(this, that)
@@ -917,9 +964,10 @@ suspend fun main() {
             DeclEnvironment.KsTypeDeclaration(
                 MutableList,
                 persistentListOf(DeclEnvironment.KsTypeParameter(T)),
-                persistentHashSetOf(List(outp(T)))
+                persistentHashSetOf(List(T))
             )
         )
+
 
         println(List(TT))
         println(List(List(TT)))
@@ -932,5 +980,8 @@ suspend fun main() {
         checkEquals(MutableList(MutableList(TT)), List(List(TT)) and MutableList(MutableList(TT)))
 
         println(A(inp(T)) and A(inp(TT)))
+
+        val Int by Int::class
+        println(Int)
     }
 }

@@ -26,6 +26,7 @@ val execute by tasks.creating(JavaExec::class) {
 
 dependencies {
     implementation(kotlin("stdlib"))
+    implementation(kotlin("reflect"))
     implementation("org.jetbrains.kotlinx:kotlinx-collections-immutable-jvm:0.3.4")
 
     testImplementation(kotlin("test"))
