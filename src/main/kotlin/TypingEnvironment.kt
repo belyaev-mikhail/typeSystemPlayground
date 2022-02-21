@@ -38,6 +38,23 @@ abstract class TypingEnvironment {
     abstract fun declsiteVariance(constructor: KsConstructor, index: Int): Variance
 }
 
+object EmptyEnvironment: TypingEnvironment() {
+    override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation =
+        defaultSubtypingRelation(this, that)
+
+    override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
+        if (that == KsConstructor.Any) return KsConstructor.Any
+        else throw IllegalStateException()
+    }
+
+    override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
+        return this
+    }
+
+    override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
+        return Variance.Invariant
+    }
+}
 
 class DeclEnvironment: TypingEnvironment() {
 

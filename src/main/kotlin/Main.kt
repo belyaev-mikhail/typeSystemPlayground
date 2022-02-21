@@ -41,6 +41,11 @@ data class KsProjection(val outBound: KsType, val inBound: KsType = outBound) {
         }
     }
 
+    val outProjection: KsProjection
+        get() = copy(inBound = KsType.Bottom)
+    val inProjection: KsProjection
+        get() = copy(outBound = KsType.Top)
+
     companion object {
         fun In(type: KsType) = KsProjection(KsType.Top, type)
         fun Out(type: KsType) = KsProjection(type, KsType.Bottom)
@@ -183,7 +188,6 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
                     val (f, nf) = iterator.partitionInstanceOf(KsFlexible::class)
                     f += arg
                     nf += resArgs
-                    // What?
                     return KsFlexible(
                         env,
                         KsUnion(
@@ -647,24 +651,6 @@ inline fun <T> checkEquals(expected: T, actual: T) {
     }
 }
 
-object EmptyEnvironment: TypingEnvironment() {
-    override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation =
-        defaultSubtypingRelation(this, that)
-
-    override fun KsConstructor.getEffectiveSupertypeByConstructor(that: KsConstructor): KsBaseType {
-        if (that == KsConstructor.Any) return KsConstructor.Any
-        else throw IllegalStateException()
-    }
-
-    override fun KsTypeApplication.remapTypeArguments(subtype: KsTypeApplication): KsTypeApplication {
-        return this
-    }
-
-    override fun declsiteVariance(constructor: KsConstructor, index: Int): Variance {
-        return Variance.Invariant
-    }
-}
-
 class MapToSet<K, V>(val inner: MutableMap<K, MutableSet<V>> = mutableMapOf()): Map<K, MutableSet<V>> by inner {
     override fun get(key: K): MutableSet<V> = inner.getOrPut(key) { mutableSetOf() }
     override fun getOrDefault(key: K, defaultValue: MutableSet<V>): MutableSet<V> =
@@ -691,11 +677,11 @@ fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsProj
                         else KsProjection(
                             outBound = when (val outBound = it.outBound) {
                                 what -> withWhat.outBound
-                                else -> outBound.replace()
+                                else -> outBound.replace(env, what, KsProjection(withWhat.outBound))
                             },
                             inBound = when (val inBound = it.inBound) {
                                 what -> withWhat.inBound
-                                else -> inBound.replace()
+                                else -> inBound.replace(env, what, KsProjection(withWhat.inBound))
                             },
                         )
                     }
@@ -801,5 +787,30 @@ suspend fun main() {
 
         val Int by Int::class
         println(Int)
+        // TODO: both of these fail now
+
+        // MutableList<T | A> / {T} -> in TT =
+        // MutableList<{out Any? | out A, in TT | in A}> =
+        // MutableList<{out Any?, in (TT | A)}> =
+        // MutableList<in (TT | A)>
+        checkEquals(
+            MutableList(inp(TT or A)),
+            MutableList(T or A).replace(env, T, inp(TT))
+        )
+
+        // MutableList<T | A> / {T} -> out TT =
+        // MutableList<{out TT | out A, in Nothing | in A}> =
+        // MutableList<{out (TT | A), in A}>
+
+        checkEquals(
+            MutableList(KsProjection(
+                outBound = TT or A,
+                inBound = A
+            )),
+            MutableList(T or A).replace(env, T, outp(TT))
+        )
+
+        println(MutableList(outp(MutableList(T))).replace(env, T, outp(TT)))
+
     }
 }
