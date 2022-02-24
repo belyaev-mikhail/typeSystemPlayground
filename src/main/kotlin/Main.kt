@@ -622,8 +622,8 @@ operator fun KsConstructor.invoke(vararg args: KsType): KsTypeApplication {
     return result
 }
 
-inline operator fun TypingEnvironment.getValue(thisRef: Any?, prop: KProperty<*>): KsConstructor =
-    type(prop.name)
+inline operator fun TypingEnvironment.provideDelegate(thisRef: Any?, prop: KProperty<*>): Box<KsConstructor> =
+    Box(type(prop.name))
 
 context(TypingEnvironment)
 val KsType.q get() = KsNullable(env, this)
@@ -661,38 +661,78 @@ class MapToSet<K, V>(val inner: MutableMap<K, MutableSet<V>> = mutableMapOf()): 
     override fun toString(): String = inner.toString()
 }
 
-fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsType {
-    fun KsType.replace(): KsType = replace(env, what, withWhat)
+data class KsLazyProjection(val outBoundLazy: Lazy<KsType>, val inBoundLazy: Lazy<KsType>) {
+    constructor(nonLazy: KsProjection): this(lazy { nonLazy.outBound }, lazy { nonLazy.inBound })
+    constructor(outBound: KsType, inBound: KsType = outBound): this(lazy { outBound }, lazy { inBound })
+
+    val outBound
+        get() = outBoundLazy.value
+    val inBound
+        get() = inBoundLazy.value
+
+    fun force(): KsProjection = KsProjection(outBound, inBound)
+}
+
+fun KsType.replaceWithProjectionLazy(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsLazyProjection {
+    fun KsType.replace(): KsLazyProjection = replaceWithProjectionLazy(env, what, withWhat)
     return when(this) {
-        what -> withWhat.outBound
-        is KsConstructor -> this
+        what -> KsLazyProjection(withWhat)
+        is KsConstructor -> KsLazyProjection(this)
         is KsTypeApplication ->
             when (constructor) {
-                what -> withWhat.outBound
-                else -> KsTypeApplication(
-                    env,
-                    constructor,
-                    args.mapTo(persistentListOf()) {
-                        if (it == KsProjection.Star) it
-                        else KsProjection(
-                            outBound = when (val outBound = it.outBound) {
-                                what -> withWhat.outBound
-                                else -> outBound.replace(env, what, KsProjection(withWhat.outBound))
-                            },
-                            inBound = when (val inBound = it.inBound) {
-                                what -> withWhat.inBound
-                                else -> inBound.replace(env, what, KsProjection(withWhat.inBound))
-                            },
-                        )
-                    }
+                what -> KsLazyProjection(withWhat)
+                else -> KsLazyProjection(
+                    KsTypeApplication(
+                        env,
+                        constructor,
+                        args.mapTo(persistentListOf()) {
+                            KsProjection(
+                                outBound = it.outBound.replace().outBound,
+                                inBound = it.inBound.replace().inBound
+                            )
+                        }
+                    )
                 )
             }
-        is KsFlexible -> KsFlexible(env, from.replace(), to.replace())
-        is KsIntersection -> KsIntersection(env, args.mapTo(persistentHashSetOf()) { it.replace() })
-        is KsUnion -> KsUnion(env, args.mapTo(persistentHashSetOf()) { it.replace() })
-        is KsNullable -> KsNullable(env, base.replace())
+        is KsFlexible -> {
+            val fromProj = from.replace()
+            val toProj = to.replace()
+            KsLazyProjection(
+                outBound = KsFlexible(env, fromProj.outBound, toProj.outBound),
+                inBound = KsFlexible(env, fromProj.inBound, toProj.inBound)
+            )
+        }
+        is KsIntersection -> {
+            val projArgs = args.mapTo(persistentHashSetOf()) { it.replace() }
+            KsLazyProjection(
+                outBound = KsIntersection(env, projArgs.mapTo(persistentHashSetOf()) { it.outBound }),
+                inBound = KsIntersection(env, projArgs.mapTo(persistentHashSetOf()) { it.inBound })
+            )
+        }
+        is KsUnion -> {
+            val projArgs = args.mapTo(persistentHashSetOf()) { it.replace() }
+            KsLazyProjection(
+                outBound = KsUnion(env, projArgs.mapTo(persistentHashSetOf()) { it.outBound }),
+                inBound = KsUnion(env, projArgs.mapTo(persistentHashSetOf()) { it.inBound })
+            )
+        }
+        is KsNullable -> {
+            val projBase = base.replace()
+            KsLazyProjection(
+                outBound = KsNullable(env, projBase.outBound),
+                inBound = KsNullable(env, projBase.inBound)
+            )
+        }
     }
 }
+
+fun KsType.replaceWithProjection(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsProjection =
+    replaceWithProjectionLazy(env, what, withWhat).force()
+fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsType =
+    replaceWithProjection(env, what, withWhat).run {
+        check(outBound == inBound)
+        outBound
+    }
 
 fun KsType.replace(env: TypingEnvironment, what: KsConstructor, withWhat: KsType): KsType =
     replace(env, what, KsProjection(withWhat))
@@ -787,7 +827,21 @@ suspend fun main() {
 
         val Int by Int::class
         println(Int)
-        // TODO: both of these fail now
+
+        checkEquals(
+            MutableList(outp(MutableList(outp(TT)))),
+            MutableList(outp(MutableList(outp(T)))).replace(env, T, outp(TT))
+        )
+
+        checkEquals(
+            MutableList(outp(MutableList(outp(TT)))),
+            MutableList(outp(MutableList(T))).replace(env, T, outp(TT))
+        )
+
+        checkEquals(
+            MutableList(outp(MutableList(inp(TT)))),
+            MutableList(outp(MutableList(T))).replace(env, T, inp(TT))
+        )
 
         // MutableList<T | A> / {T} -> in TT =
         // MutableList<{out Any? | out A, in TT | in A}> =
@@ -810,7 +864,8 @@ suspend fun main() {
             MutableList(T or A).replace(env, T, outp(TT))
         )
 
-        println(MutableList(outp(MutableList(T))).replace(env, T, outp(TT)))
+        println(MutableList(KsFlexible(env, T, T.q)).replace(env, T, outp(TT)))
+
 
     }
 }

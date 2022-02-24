@@ -2,6 +2,8 @@ package org.jetbrains.kotlin.types.play
 
 import kotlinx.collections.immutable.*
 import kotlin.collections.filterTo
+import kotlin.properties.ReadOnlyProperty
+import kotlin.reflect.KProperty
 
 inline fun <T> persistentSetBuilder(): PersistentSet.Builder<T> = persistentSetOf<T>().builder()
 inline fun <T> persistentHashSetBuilder(): PersistentSet.Builder<T> = persistentHashSetOf<T>().builder()
@@ -62,3 +64,6 @@ inline fun <T, R, C : PersistentCollection<R>> Iterable<T>.mapTo(destination: C,
 
 inline fun <T, C : PersistentCollection<T>> Iterable<T>.filterTo(destination: C, predicate: (T) -> Boolean): C =
     filterTo(destination.builder(), predicate).build() as C
+
+data class Box<out T>(val value: T)
+operator fun <T> Box<T>.getValue(thisRef: Any?, prop: KProperty<*>): T = value

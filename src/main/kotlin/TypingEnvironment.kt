@@ -120,9 +120,9 @@ class DeclEnvironment: TypingEnvironment() {
         declarationStubs.remove(constructor)
     }
 
-    operator fun KClass<*>.getValue(thisRef: Any?, kProperty: KProperty<*>): KsConstructor {
+    operator fun KClass<*>.provideDelegate(thisRef: Any?, kProperty: KProperty<*>): Box<KsConstructor> {
         addDeclaration(this)
-        return KsConstructor(qualifiedName!!)
+        return Box(KsConstructor(qualifiedName!!))
     }
 
     override fun KsConstructor.subtypingRelationTo(that: KsConstructor): SubtypingRelation {
