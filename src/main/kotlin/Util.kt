@@ -1,8 +1,6 @@
 package org.jetbrains.kotlin.types.play
 
 import kotlinx.collections.immutable.*
-import kotlin.collections.filterTo
-import kotlin.properties.ReadOnlyProperty
 import kotlin.reflect.KProperty
 
 inline fun <T> persistentSetBuilder(): PersistentSet.Builder<T> = persistentSetOf<T>().builder()

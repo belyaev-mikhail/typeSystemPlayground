@@ -5,13 +5,15 @@ import kotlin.reflect.*
 
 object Options {
     const val SIMPLIFY_FLEXIBLE_IN_PROJECTION = true
-    const val NULLABLE_IS_UNION = false
+    const val NULLABLE_IS_UNION = true
 }
 
 sealed interface KsType {
     fun normalizeWithStructure(env: TypingEnvironment): KsType
     fun normalizeWithSubtyping(env: TypingEnvironment): KsType = this
     fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation
+
+    fun toStringElement(): String = toString()
 
     companion object {
         val Top = KsNullable.Any
@@ -26,11 +28,6 @@ inline fun <reified T: KsType, Arg> makeNormalized(env: TypingEnvironment,
 inline fun <reified T: KsType, A, B> makeNormalized(env: TypingEnvironment,constructor: (A, B) -> T, a: A, b: B): KsType =
     constructor(a, b).normalizeWithStructure(env).normalizeWithSubtyping(env)
 
-private fun parenthesize(type: KsType) = when(type) {
-    is KsConstructor, is KsTypeApplication, is KsNullable -> "$type"
-    else -> "($type)"
-}
-
 private inline fun <E: Any, reified T: E> Iterator<E>.partitionInstanceOf(kClass: KClass<T>, predicate: (T) -> Boolean = {true}) =
     partitionTo(persistentHashSetBuilder(), persistentHashSetBuilder()) { it is T && predicate(it) }
         as Pair<PersistentSet.Builder<T>, PersistentSet.Builder<E>>
@@ -40,9 +37,9 @@ data class KsProjection(val outBound: KsType, val inBound: KsType = outBound) {
         when {
             outBound == inBound -> return "$outBound"
             outBound == KsType.Top && inBound == KsType.Bottom -> return "*"
-            outBound == KsType.Top -> return "in ${parenthesize(inBound)}"
-            inBound == KsType.Bottom -> return "out ${parenthesize(outBound)}"
-            else -> return "{in ${parenthesize(inBound)}, out ${parenthesize(outBound)}}"
+            outBound == KsType.Top -> return "in ${inBound.toStringElement()}"
+            inBound == KsType.Bottom -> return "out ${outBound.toStringElement()}"
+            else -> return "{in ${inBound.toStringElement()}, out ${outBound.toStringElement()}}"
         }
     }
 
@@ -83,13 +80,14 @@ data class KsFlexible(val from: KsType, val to: KsType): KsType {
     }
 
     override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
-        if (from == KsType.Bottom) return to
         if (!(to supertypeOf from)) throw IllegalStateException("Incorrect flexible type: $this")
         this@KsFlexible
     }
 
+    override fun toStringElement(): String = "($this)"
+
     override fun toString(): String {
-        return "${parenthesize(from)}..${parenthesize(to)}"
+        return "${from.toStringElement()}..${to.toStringElement()}"
     }
 }
 fun KsFlexible(
@@ -109,21 +107,47 @@ data class KsNullable(val base: KsType): KsType {
         }
     }
 
-    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when(base) {
+    private fun normalizeWithStructureImpl(env: TypingEnvironment): KsType = when(base) {
         is KsFlexible ->
             KsFlexible(env, KsNullable(env, base.from), KsNullable(env, base.to))
         is KsNullable -> base
         else -> this
     }
 
-    override fun toString(): String = "${parenthesize(base)}?"
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
+        Options.NULLABLE_IS_UNION -> KsUnion(env, base, KsNullType(env))
+        else -> normalizeWithStructureImpl(env)
+    }
+
+    override fun toString(): String = "${base.toStringElement()}?"
 
     companion object {
-        val Any = KsNullable(KsConstructor.Any)
-        val Nothing = KsNullable(KsConstructor.Nothing)
+        private fun make(arg: KsType): KsType = when {
+            Options.NULLABLE_IS_UNION -> KsUnion(persistentHashSetOf(arg, KsNullType))
+            else -> KsNullable(arg)
+        }
+        val Any = make(KsConstructor.Any)
+        val Nothing = make(KsConstructor.Nothing)
     }
 }
 fun KsNullable(env: TypingEnvironment, base: KsType): KsType = makeNormalized(env, ::KsNullable, base)
+
+object KsNullType: KsType {
+    override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
+        !Options.NULLABLE_IS_UNION -> KsNullable(env, KsType.Bottom)
+        else -> this
+    }
+
+    override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = when (that) {
+        KsType.Bottom -> SubtypingRelation.Supertype
+        is KsFlexible, is KsUnion, is KsIntersection -> that.subtypingRelationTo(env, this).invert()
+        else -> SubtypingRelation.Unrelated
+    }
+
+    override fun toString(): String = "Null"
+}
+fun KsNullType(env: TypingEnvironment): KsType =
+    KsNullType.normalizeWithStructure(env).normalizeWithSubtyping(env)
 
 data class KsUnion(val args: PersistentSet<KsType>): KsType {
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = with (env) {
@@ -280,8 +304,14 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
         return make(newArgs)
     }
 
-    override fun toString(): String {
-        return args.joinToString(" | ")
+    override fun toStringElement(): String = when {
+        KsNullType in args && args.size <= 2 -> "$this"
+        else -> "($this)"
+    }
+
+    override fun toString(): String = when {
+        KsNullType in args && args.size <= 2 -> "${args.find { it != KsNullType }}?"
+        else -> args.joinToString(" | ") { it.toStringElement() }
     }
 }
 fun KsUnion(env: TypingEnvironment, args: PersistentSet<KsType>): KsType =
@@ -354,6 +384,9 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
         val iterator = args.iterator()
         for (arg in iterator) {
             when (arg) {
+                is KsNullType -> { // this can only happen when Options.NULLABLE_IS_UNION == true
+                    return KsType.Bottom
+                }
                 is KsFlexible -> {
                     val (f, nf) = iterator.partitionInstanceOf(KsFlexible::class)
                     f += arg
@@ -461,8 +494,10 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
         return make(newArgs)
     }
 
+    override fun toStringElement(): String = "($this)"
+
     override fun toString(): String {
-        return args.joinToString(" & ")
+        return args.joinToString(" & ") { it.toStringElement() }
     }
 }
 fun KsIntersection(env: TypingEnvironment, args: PersistentSet<KsType>): KsType =
@@ -482,8 +517,9 @@ data class KsConstructor(val name: String): KsBaseType {
 
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation =
         with(env) {
+            if (this@KsConstructor == Nothing) return SubtypingRelation.Subtype
             when(that) {
-                is KsFlexible, is KsNullable, is KsUnion, is KsIntersection ->
+                is KsFlexible, is KsNullable, is KsUnion, is KsIntersection, is KsNullType ->
                     return that.subtypingRelationTo(this@KsConstructor).invert()
                 else -> {}
             }
@@ -523,6 +559,7 @@ data class KsTypeApplication
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation =
         with(env) {
             when(that) {
+                is KsNullType -> SubtypingRelation.Unrelated
                 is KsFlexible, is KsNullable, is KsUnion, is KsIntersection, is KsConstructor ->
                     that.subtypingRelationTo(this@KsTypeApplication).invert()
                 is KsTypeApplication -> {
@@ -564,7 +601,7 @@ data class KsTypeApplication
         else -> {
             if (Options.SIMPLIFY_FLEXIBLE_IN_PROJECTION) {
                 val newArgs = args.mapTo(persistentListOf()) {
-                    if (it.outBound == KsType.Top && it.inBound is KsFlexible) KsProjection.In(it.inBound.to)
+                    if (it.outBound != it.inBound && it.inBound is KsFlexible) it.copy(inBound = it.inBound.to)
                     else it
                 }
                 copy(args = newArgs)
@@ -690,6 +727,7 @@ data class KsLazyProjection(val outBoundLazy: Lazy<KsType>, val inBoundLazy: Laz
 fun KsType.replaceWithProjectionLazy(env: TypingEnvironment, what: KsConstructor, withWhat: KsProjection): KsLazyProjection {
     fun KsType.replace(): KsLazyProjection = replaceWithProjectionLazy(env, what, withWhat)
     return when(this) {
+        is KsNullType -> KsLazyProjection(KsNullType)
         what -> KsLazyProjection(withWhat)
         is KsConstructor -> KsLazyProjection(this)
         is KsTypeApplication ->
@@ -761,13 +799,20 @@ suspend fun main() {
         val TT by env
 
         checkEquals(KsUnion(persistentHashSetOf(T, A(outp(T)))), T or A(outp(T)))
-        checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(outp(T))))), T or A(outp(T)) or T.q)
+        // checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(outp(T))))), T or A(outp(T)) or T.q)
         checkEquals(T, T or T)
         checkEquals(T, T and T)
+        checkEquals(T, T and T.q)
         checkEquals(T and TT, TT and T)
+        checkEquals(T and TT, TT and T.q)
         checkEquals(T.q, T.q.q.q.q.q)
         checkEquals(T or TT or A, TT or A or T)
-        checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(Star)))), T or A(Star).q)
+        if (Options.NULLABLE_IS_UNION) {
+            checkEquals(KsUnion(persistentHashSetOf(T, A(Star), KsNullType)), T or A(Star).q)
+        } else {
+            checkEquals(KsNullable(KsUnion(persistentHashSetOf(T, A(Star)))), T or A(Star).q)
+        }
+        //
         checkEquals(
             KsUnion(
                 persistentHashSetOf(
@@ -790,6 +835,7 @@ suspend fun main() {
             A(Star) and A(T)
         )
         println(A(TT) or A(T))
+        println(A(TT) and A(T))
         println(A(T) or A(T.q))
 
         println(A(T) and A(T.q))
@@ -881,6 +927,11 @@ suspend fun main() {
         println(MutableList(KsFlexible(env, T, T.q)).replace(env, T, outp(TT)))
 
         println(MutableList(inp(T..T.q)))
+        val dynamic = Nothing..(Any.q)
+        println(dynamic)
+        println(MutableList(T and A).replace(env, T, outp(TT)))
 
+        println(MutableList(T and A).replace(env, T, inp(TT)))
     }
 }
+
