@@ -3,6 +3,11 @@ package org.jetbrains.kotlin.types.play
 import kotlinx.collections.immutable.*
 import kotlin.reflect.*
 
+object Options {
+    const val SIMPLIFY_FLEXIBLE_IN_PROJECTION = true
+    const val NULLABLE_IS_UNION = false
+}
+
 sealed interface KsType {
     fun normalizeWithStructure(env: TypingEnvironment): KsType
     fun normalizeWithSubtyping(env: TypingEnvironment): KsType = this
@@ -78,6 +83,7 @@ data class KsFlexible(val from: KsType, val to: KsType): KsType {
     }
 
     override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
+        if (from == KsType.Bottom) return to
         if (!(to supertypeOf from)) throw IllegalStateException("Incorrect flexible type: $this")
         this@KsFlexible
     }
@@ -555,7 +561,15 @@ data class KsTypeApplication
 
     override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
         args.isEmpty() -> constructor
-        else -> copy(constructor, args)
+        else -> {
+            if (Options.SIMPLIFY_FLEXIBLE_IN_PROJECTION) {
+                val newArgs = args.mapTo(persistentListOf()) {
+                    if (it.outBound == KsType.Top && it.inBound is KsFlexible) KsProjection.In(it.inBound.to)
+                    else it
+                }
+                copy(args = newArgs)
+            } else this
+        }
     }
 
     override fun toString(): String {
@@ -866,6 +880,7 @@ suspend fun main() {
 
         println(MutableList(KsFlexible(env, T, T.q)).replace(env, T, outp(TT)))
 
+        println(MutableList(inp(T..T.q)))
 
     }
 }
