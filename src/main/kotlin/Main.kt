@@ -384,9 +384,6 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
         val iterator = args.iterator()
         for (arg in iterator) {
             when (arg) {
-                is KsNullType -> { // this can only happen when Options.NULLABLE_IS_UNION == true
-                    return KsType.Bottom
-                }
                 is KsFlexible -> {
                     val (f, nf) = iterator.partitionInstanceOf(KsFlexible::class)
                     f += arg
@@ -484,6 +481,9 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
     }
 
     override fun normalizeWithSubtyping(env: TypingEnvironment): KsType = with(env) {
+        if (KsNullType in args && args.any { it subtypeOf KsConstructor.Any })
+            return KsConstructor.Nothing
+
         val supertypes = args.filterTo(persistentHashSetOf()) { l ->
             args.any { l != it && l supertypeOf it }
         }

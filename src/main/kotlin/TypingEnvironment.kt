@@ -10,9 +10,7 @@ abstract class TypingEnvironment {
     companion object {
         fun defaultSubtypingRelation(from: KsConstructor, to: KsConstructor): SubtypingRelation = when {
             from == to -> SubtypingRelation.Equivalent
-            from == KsConstructor.Any -> SubtypingRelation.Supertype
             from == KsConstructor.Nothing -> SubtypingRelation.Subtype
-            to == KsConstructor.Any -> SubtypingRelation.Subtype
             to == KsConstructor.Nothing -> SubtypingRelation.Supertype
             else -> SubtypingRelation.Unrelated
         }
@@ -74,7 +72,7 @@ class DeclEnvironment: TypingEnvironment() {
 
     fun addDeclaration(decl: KsTypeDeclaration) {
         // TODO: remap all supertypes, for now you have to specify them explicitly
-        decls[decl.constructor] = decl
+        decls[decl.constructor] = decl.copy(supertypes = decl.supertypes.add(KsConstructor.Any))
     }
     private fun inject(kClass: KClassifier): KsType = when(kClass) {
         is KClass<*> -> {
