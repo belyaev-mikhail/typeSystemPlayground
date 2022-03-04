@@ -16,8 +16,9 @@ sealed interface KsType {
     fun toStringElement(): String = toString()
 
     companion object {
-        val Top = KsNullable.Any
-        val Bottom = KsConstructor.Nothing
+        val AnyQ = KsNullable.Any
+        val Any = KsConstructor.Any
+        val Nothing = KsConstructor.Nothing
     }
 }
 
@@ -36,22 +37,22 @@ data class KsProjection(val outBound: KsType, val inBound: KsType = outBound) {
     override fun toString(): String {
         when {
             outBound == inBound -> return "$outBound"
-            outBound == KsType.Top && inBound == KsType.Bottom -> return "*"
-            outBound == KsType.Top -> return "in ${inBound.toStringElement()}"
-            inBound == KsType.Bottom -> return "out ${outBound.toStringElement()}"
+            outBound == KsType.AnyQ && inBound == KsType.Nothing -> return "*"
+            outBound == KsType.AnyQ -> return "in ${inBound.toStringElement()}"
+            inBound == KsType.Nothing -> return "out ${outBound.toStringElement()}"
             else -> return "{in ${inBound.toStringElement()}, out ${outBound.toStringElement()}}"
         }
     }
 
     val outProjection: KsProjection
-        get() = copy(inBound = KsType.Bottom)
+        get() = copy(inBound = KsType.Nothing)
     val inProjection: KsProjection
-        get() = copy(outBound = KsType.Top)
+        get() = copy(outBound = KsType.AnyQ)
 
     companion object {
-        fun In(type: KsType) = KsProjection(KsType.Top, type)
-        fun Out(type: KsType) = KsProjection(type, KsType.Bottom)
-        val Star = KsProjection(KsType.Top, KsType.Bottom)
+        fun In(type: KsType) = KsProjection(KsType.AnyQ, type)
+        fun Out(type: KsType) = KsProjection(type, KsType.Nothing)
+        val Star = KsProjection(KsType.AnyQ, KsType.Nothing)
     }
 }
 
@@ -134,12 +135,12 @@ fun KsNullable(env: TypingEnvironment, base: KsType): KsType = makeNormalized(en
 
 object KsNullType: KsType {
     override fun normalizeWithStructure(env: TypingEnvironment): KsType = when {
-        !Options.NULLABLE_IS_UNION -> KsNullable(env, KsType.Bottom)
+        !Options.NULLABLE_IS_UNION -> KsNullable(env, KsType.Nothing)
         else -> this
     }
 
     override fun subtypingRelationTo(env: TypingEnvironment, that: KsType): SubtypingRelation = when (that) {
-        KsType.Bottom -> SubtypingRelation.Supertype
+        KsType.Nothing -> SubtypingRelation.Supertype
         is KsFlexible, is KsUnion, is KsIntersection -> that.subtypingRelationTo(env, this).invert()
         else -> SubtypingRelation.Unrelated
     }
@@ -208,6 +209,9 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
     override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
         if (args.size == 1) return args.first()
+
+        if (KsNullType in args && KsType.Any in args)
+            return make(persistentHashSetOf(KsNullType, KsType.Any))
 
         val resArgs = persistentHashSetBuilder<KsType>()
         val iterator = args.iterator()
@@ -290,6 +294,9 @@ data class KsUnion(val args: PersistentSet<KsType>): KsType {
             }
 
         }
+        if (KsNullType in resArgs && KsType.Any in resArgs)
+            return make(persistentHashSetOf(KsNullType, KsType.Any))
+
         return make(resArgs.build())
     }
 
@@ -370,7 +377,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
     )
 
     private fun make(args: PersistentSet<KsType>) = when(args.size) {
-        0 -> KsConstructor.Any
+        0 -> KsType.Nothing
         1 -> args.first()
         else -> copy(args = args)
     }
@@ -378,6 +385,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
     override fun normalizeWithStructure(env: TypingEnvironment): KsType {
         require(args.size > 0)
         if (args.size == 1) return args.first()
+        if (KsNullType in args && KsType.AnyQ in args) return KsType.Nothing
 
         val resArgs = persistentHashSetBuilder<KsType>()
 
@@ -477,6 +485,7 @@ data class KsIntersection(val args: PersistentSet<KsType>): KsType {
             }
 
         }
+        if (KsNullType in resArgs && KsType.AnyQ in resArgs) return KsType.Nothing
         return make(resArgs.build())
     }
 
@@ -831,15 +840,15 @@ suspend fun main() {
             A(Star) or A(T)
         )
         checkEquals(
-            A(T),
-            A(Star) and A(T)
+            A(T and Any),
+            A(Star) and A(T and Any)
         )
         println(A(TT) or A(T))
         println(A(TT) and A(T))
         println(A(T) or A(T.q))
 
         println(A(T) and A(T.q))
-        checkEquals(TT and T, (TT..TT.q.q.q.q.q) and T)
+        //checkEquals(TT and T, (TT..TT.q.q.q.q.q) and T)
         checkEquals(TT, TT and TT)
 
         val a = T or Nothing.q
