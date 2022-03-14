@@ -933,6 +933,9 @@ suspend fun main() {
             MutableList(T or A).replace(env, T, outp(TT))
         )
 
+        // MutableList<T..T?> / {T} -> out TT =
+        // MutableList<{out TT .. out TT?, in Nothing .. in Nothing?}> =
+        // MutableList<{out (TT..TT?), in (Nothing..Nothing?)}>
         println(MutableList(KsFlexible(env, T, T.q)).replace(env, T, outp(TT)))
 
         println(MutableList(inp(T..T.q)))
@@ -941,6 +944,9 @@ suspend fun main() {
         println(MutableList(T and A).replace(env, T, outp(TT)))
 
         println(MutableList(T and A).replace(env, T, inp(TT)))
+
+        println(MutableList(inp(T)).replace(env, T, outp(TT)))
+        println(MutableList(T.q).replace(env, T, outp(TT)))
     }
 }
 
